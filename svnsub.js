@@ -34,8 +34,7 @@ var queue = async.queue(handleCommit, 1)
 var server = net.createServer(function(c) {
 	console.log("Client Connected", c.remoteAddress);
 	var payload = {
-		end: false,
-		host: "http://" + c.remoteAddress
+		end: false
 	};
 	queue.push(payload);
 	var response = "";
@@ -44,7 +43,8 @@ var server = net.createServer(function(c) {
 	})
 	c.on('end', function () {
 		payload.data = JSON.parse(response);
-		payload.host +=  ":" + (config[payload.data.repo].repoPort||80) + "/"
+		var repo = payload.data.repo;
+		payload.host = util.format("%s://%s:%d/", config[repo].protocol||'http', c.remoteAddress, config[repo].repoPort||80)
 		payload.end = true;
 	})
 });
