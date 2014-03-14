@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-var util   = require('util'); 
+var util   = require('util');
 var exec  = require('child_process').exec;
 var async  = require('async');
 var fs     = require('fs');
@@ -33,6 +33,8 @@ var queue = async.queue(handleCommit, 1)
 
 var server = net.createServer(function(c) {
 	console.log("Client Connected", c.remoteAddress);
+	// Create a new job for async.queue and add it immediately.  Reasoning and explanation for doing that now instead
+	// of when all of the data is gathered is detailed in handleCommit() function.
 	var payload = {
 		end: false,
 		host: c.remoteAddress
@@ -45,14 +47,23 @@ var server = net.createServer(function(c) {
 	c.on('end', function () {
 		payload.data = JSON.parse(response);
 		var repo = payload.data.repo;
+		// Add the protocol and port to the host.  They aren't available until we have gathered all the data as we
+		// don't know which repo we'll have to connect to until we have data.repo.
 		payload.host = util.format("%s://%s:%d/", config[repo].protocol||'http', payload.host, config[repo].repoPort||80)
 		payload.end = true;
 	})
 });
-server.listen(process.argv[3]||2069, function () {
-});
+server.listen(process.argv[3]||2069);
 
 function handleCommit(task, queueCB) {
+	// Multiple connections can be made at once, and each of those jobs could contain large jobs that take a long
+	// time to download and/or process, we need to make sure we process only one job at a time and in the order it
+	// was received.  Otherwise, a small commit that modifies a file added in a larger previous commit could be
+	// overriden. To accomplish this, as soon as a connection is made we create an object with a property 'end' set
+	// to false and queue it.  Once all of the data has been collected (connection closed), the 'end' property is set
+	// to 'true'.  As soon as the job is queued, async.queue will call this function to handle it.  Because objects
+	// are passed by reference we can use a while loop construct (async.whilst) to do nothing while the task.end is
+	// false.  Once it's true, the while loop is exited and after() is called.
 	async.whilst(
 		function truth() { return !task.end },
 		function doThis(cb) { setTimeout(cb, 10); },
@@ -64,12 +75,14 @@ function handleCommit(task, queueCB) {
 			var rev = task.data.rev;
 			var url = task.host + repoConfig.repoPath + '/';
 			console.log("Processing rev. " + rev + " from " + url);
-			async.parallel({ 
+			// Since any one commit can't contain both removing a file and modifying that same file, it's safe to process
+			// the file changes as well as file deletes at the same time.
+			async.parallel({
 				exps: function exps(parallelCB) {
 					totalExps = 0;
 					async.eachLimit(
 						task.data.exports,
-						100,
+						100, // Limit to doing 100 file exports at a time.
 						function iterator(file, eachCB) {
 							var remotePath = url+file+"@"+rev // The full url/path to retrieve the file from the repo, with a PEGREV
 								, localPath = repoConfig.localPath + file.replace(repoConfig.prefix, '') // Full path to where the file should end up
@@ -95,9 +108,10 @@ function handleCommit(task, queueCB) {
 					totalDels = 0;
 					async.eachLimit(
 						task.data.deletes,
-						100,
+						100, // Limit to deleting 100 files at a time.
 						function iterator(file, eachCB) {
 							var localPath = getRealPath(repoConfig.localPath, file), eachCB
+							// How we delete the file depends on if it's actually a file or a directory.
 							fs.stat(localPath, function(err, stats) {
 								// Only pass the error along if it isn't about the file not existing.
 								if (err) { return eachCB(err.CODE=='ENOENT'?null:err); }
@@ -126,6 +140,8 @@ function handleCommit(task, queueCB) {
 	);
 }
 
+// Returns actual path the file will have on the local filesystem (i.e. where it will be exported if it was
+// added/modified or where it is if it needs to be deleted.
 function getRealPath(base, file) {
 	return base+file.replace(/^trunk\/|branches\/[^\/]+\//, '')
 }
